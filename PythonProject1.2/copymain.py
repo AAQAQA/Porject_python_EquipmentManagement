@@ -17,6 +17,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtGui import QFont
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
 
 # ==================== 导入数据库和单据模块 ====================
 from database import Database
@@ -190,8 +192,9 @@ class EquipmentSelectDialog(QDialog):
             kw_pattern = f"%{kw}%"
             params.extend([kw_pattern, kw_pattern, kw_pattern, kw_pattern])
         if q:
-            sql += " AND e.quality_level = ?"
-            params.append(q)
+            # 改为模糊匹配，解决“堪用品”搜索“堪用”找不到的问题
+            sql += " AND e.quality_level LIKE ?"
+            params.append(f"%{q}%")
 
         sql += " ORDER BY e.updated_at DESC LIMIT 500"
 
@@ -1464,7 +1467,7 @@ class MainWindow(QMainWindow):
     """
     应用程序主窗口
     根据登录角色（机关/中队）显示不同的选项卡界面，
-    集成了器材档案、出入库管理、库存看板、操作日志、数据备份等功能。
+    集成了器材目录、出入库管理、库存看板、操作日志、数据备份等功能。
     """
     def __init__(self, role, belong_unit, operator_name):
         super().__init__()
@@ -1487,18 +1490,22 @@ class MainWindow(QMainWindow):
         self.init_ui()                          # 初始化界面
         self.check_expiry()                     # 检查即将到期的器材并提醒
 
+        self.auto_backup()   # 启动时自动备份数据库
+
         # 记录登录日志
         self.db.add_log('登录', '系统', None, f'{title}登录',
                         operator=operator_name, role=role, belong_unit=belong_unit)
+
+
 
     def init_ui(self):
         """创建选项卡容器，并逐个添加选项卡"""
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        # 器材档案选项卡（机关和中队共用）
+        # 器材目录选项卡（机关和中队共用）
         self.tab_equip = self.create_equipment_tab()
-        self.tabs.addTab(self.tab_equip, "器材档案")
+        self.tabs.addTab(self.tab_equip, "器材目录")
 
         # 根据角色添加不同的功能选项卡
         if self.role == 'org':
@@ -1514,10 +1521,25 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.create_log_tab(), "📝 操作日志")
         self.tabs.addTab(self.create_backup_tab(), "💾 数据备份")
 
-    # ==================== 器材档案选项卡 ====================
+    def auto_backup(self):
+        """程序启动时自动备份数据库到 backups 目录"""
+        backup_dir = os.path.join(os.path.dirname(__file__), 'backups')
+        os.makedirs(backup_dir, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_file = os.path.join(backup_dir, f"auto_backup_{timestamp}.bak")
+        try:
+            self.db.backup_database(backup_file)
+            self.db.add_log('备份', '数据库', None, f'自动备份到:{backup_file}',
+                            operator=self.operator_name, role=self.role,
+                            belong_unit=self.belong_unit)
+        except Exception as e:
+            # 自动备份失败不影响主流程，仅控制台输出或记录日志
+            print(f"自动备份失败：{e}")
+
+    # ==================== 器材目录选项卡 ====================
     def create_equipment_tab(self):
         """
-        创建器材档案选项卡
+        创建器材目录选项卡
         显示所有器材信息，支持搜索筛选（关键词 + 质量等级）、
         新增、编辑、删除器材，并显示当前库存（机关或中队）。
         """
@@ -1622,7 +1644,7 @@ class MainWindow(QMainWindow):
                 si.setForeground(Qt.red)        # 库存为0时显示红色
             self.eq_table.setItem(i, 12, si)
 
-        self.status_bar.showMessage(f"器材档案：共 {len(records)} 条")
+        self.status_bar.showMessage(f"器材目录：共 {len(records)} 条")
 
     def get_selected_equip_id(self):
         """获取当前选中的器材ID（根据名称和规格匹配）"""
@@ -1690,14 +1712,9 @@ class MainWindow(QMainWindow):
 
     # ==================== 机关入库记录选项卡 ====================
     def create_org_in_tab(self):
-        """
-        创建机关入库记录选项卡
-        显示所有机关入库记录，支持新增入库、从Excel导入、重新生成本日入库单、删除记录。
-        """
         w = QWidget()
         layout = QVBoxLayout(w)
 
-        # ---------- 操作按钮行 ----------
         bl = QHBoxLayout()
         btn_add = QPushButton("＋ 新增入库")
         btn_add.clicked.connect(self.add_org_in)
@@ -1706,6 +1723,10 @@ class MainWindow(QMainWindow):
         btn_import = QPushButton("📥 从Excel导入")
         btn_import.clicked.connect(self.import_org_in_excel)
         bl.addWidget(btn_import)
+
+        btn_export = QPushButton("📤 导出Excel")  # 新增
+        btn_export.clicked.connect(self.export_org_in_excel)
+        bl.addWidget(btn_export)
 
         btn_regen = QPushButton("📄 重新生成本日入库单")
         btn_regen.clicked.connect(self.regen_today_org_in)
@@ -1721,14 +1742,12 @@ class MainWindow(QMainWindow):
         bl.addWidget(btn_ref)
         layout.addLayout(bl)
 
-        # ---------- 入库记录表格 ----------
         self.org_in_table = QTableWidget()
-        self.org_in_table.setColumnCount(13)    # 增加一列作为删除标记列（隐藏ID）
+        self.org_in_table.setColumnCount(13)
         self.org_in_table.setHorizontalHeaderLabels([
             'ID', '器材编号', '器材名称', '规格型号', '入库数量', '计量单位', '总价',
             '入库时间', '来源类别', '入库人', '经办人', '合同编号', '备注'
         ])
-        # 隐藏第一列（ID列）
         self.org_in_table.setColumnHidden(0, True)
         self.org_in_table.horizontalHeader().setStretchLastSection(True)
         self.org_in_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1774,7 +1793,7 @@ class MainWindow(QMainWindow):
             self.org_in_table.setItem(i, 12, QTableWidgetItem(r['remark'] or ''))
 
     def add_org_in(self):
-        """打开机关入库登记对话框，成功后刷新表格和器材档案"""
+        """打开机关入库登记对话框，成功后刷新表格和器材目录"""
         dlg = OrgStockInDialog(self.db, self.operator_name, parent=self)
         if dlg.exec_() == QDialog.Accepted:
             self.db.add_log('入库', '机关入库', None, '机关入库操作',
@@ -2119,12 +2138,387 @@ class MainWindow(QMainWindow):
             self.db.rollback_transaction()
             QMessageBox.critical(self, "导入失败", f"处理Excel时出错：{str(e)}")
 
+    # ==================== 导出Excel（标准统计表格式） ====================
+    def _write_stat_header(self, ws, num_cols, title_text):
+        """写入第一行标题（合并、加粗、居中、行高约两行）"""
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
+        cell = ws.cell(row=1, column=1, value=title_text)
+        cell.font = Font(name='宋体', size=14, bold=True)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[1].height = 30  # 大约两行高度
+
+    def export_org_in_excel(self):
+        """导出机关入库记录为机关统计表（22列）"""
+        records = self.db.get_all_org_stock_in()
+        if not records:
+            QMessageBox.information(self, "提示", "没有机关入库记录可导出")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出机关入库统计表", "",
+                                                   "Excel文件(*.xlsx)")
+        if not file_path:
+            return
+        try:
+            wb = Workbook()
+            ws = wb.active
+            # 第一行：标题
+            self._write_stat_header(ws, 22, "装备维修器材入库情况统计表")
+            # 第二行：表头
+            headers = [
+                '序号', '所属单位', '所属装备', '器材名称', '规格型号',
+                '器材编号', '数量', '计量单位', '单价（元）', '总价（元）',
+                '质量等级', '生产厂家', '计价方法', '品种标识码', '生产日期',
+                '存储寿命', '来源类别', '合同编号', '入库时间', '入库人',
+                '经办人', '备注'
+            ]
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=2, column=col, value=h)
+                cell.font = Font(name='宋体', size=10, bold=True)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[2].height = 20
+
+            # 数据行（从第3行开始）
+            for i, r in enumerate(records, start=3):
+                row_data = [
+                    i - 2,  # 序号
+                    r['belong_unit'] or '',  # 所属单位
+                    r['belong_equipment'] or '',  # 所属装备
+                    r['name'] or '',  # 器材名称
+                    r['spec_model'] or '',  # 规格型号
+                    r['serial_no'] or '',  # 器材编号
+                    r['quantity'] or 0,  # 数量
+                    r['unit'] or '',  # 计量单位
+                    r['unit_price'] or 0,  # 单价
+                    r['total_price'] or 0,  # 总价
+                    r['quality_level'] or '',  # 质量等级
+                    r['manufacturer'] or '',  # 生产厂家
+                    r['pricing_method'] or '',  # 计价方法
+                    r['category_code'] or '',  # 品种标识码
+                    r['production_date'] or '',  # 生产日期
+                    r['storage_life'] or '',  # 存储寿命
+                    r['source_type'] or '',  # 来源类别
+                    r['contract_no'] or '',  # 合同编号
+                    r['in_time'] or '',  # 入库时间
+                    r['stock_in_person'] or '',  # 入库人
+                    r['operator'] or '',  # 经办人
+                    r['remark'] or ''  # 备注
+                ]
+                for col, val in enumerate(row_data, 1):
+                    ws.cell(row=i, column=col, value=val)
+            wb.save(file_path)
+            QMessageBox.information(self, "导出成功", f"已导出 {len(records)} 条机关入库记录")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+
+    def export_org_out_excel(self):
+        """导出机关出库记录为机关统计表（22列，出库）"""
+        records = self.db.get_all_org_stock_out()
+        if not records:
+            QMessageBox.information(self, "提示", "没有机关出库记录可导出")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出机关出库统计表", "",
+                                                   "Excel文件(*.xlsx)")
+        if not file_path:
+            return
+        try:
+            wb = Workbook()
+            ws = wb.active
+            self._write_stat_header(ws, 22, "机关装备出入库统计表（出库）")
+            headers = [
+                '序号', '所属单位', '所属装备', '器材名称', '规格型号',
+                '器材编号', '数量', '计量单位', '单价（元）', '总价（元）',
+                '质量等级', '生产厂家', '计价方法', '品种标识码', '生产日期',
+                '存储寿命', '来源类别', '合同编号', '出库时间', '出库人',
+                '经办人', '备注'
+            ]
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=2, column=col, value=h)
+                cell.font = Font(name='宋体', size=10, bold=True)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[2].height = 20
+
+            for i, r in enumerate(records, start=3):
+                row_data = [
+                    i - 2,
+                    r['to_unit'] or '',  # 所属单位（接收中队）
+                    r['belong_equipment'] or '',
+                    r['name'] or '',
+                    r['spec_model'] or '',
+                    r['serial_no'] or '',
+                    r['quantity'] or 0,
+                    r['unit'] or '',
+                    r['unit_price'] or 0,
+                    r['total_price'] or 0,
+                    r['quality_level'] or '',
+                    r['manufacturer'] or '',
+                    r['pricing_method'] or '',
+                    r['category_code'] or '',
+                    r['production_date'] or '',
+                    r['storage_life'] or '',
+                    r['out_direction'] or '',  # 来源类别用出库去向替代
+                    r['contract_no'] or '',
+                    r['out_time'] or '',
+                    r['stock_out_person'] or '',
+                    r['operator'] or '',
+                    r['remark'] or ''
+                ]
+                for col, val in enumerate(row_data, 1):
+                    ws.cell(row=i, column=col, value=val)
+            wb.save(file_path)
+            QMessageBox.information(self, "导出成功", f"已导出 {len(records)} 条机关出库记录")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+
+    def export_unit_in_excel(self):
+        """导出中队入库记录为中队统计表（24列）"""
+        records = self.db.get_unit_records(self.belong_unit, 'in')
+        if not records:
+            QMessageBox.information(self, "提示", "没有中队入库记录可导出")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出中队入库统计表", "",
+                                                   "Excel文件(*.xlsx)")
+        if not file_path:
+            return
+        try:
+            wb = Workbook()
+            ws = wb.active
+            self._write_stat_header(ws, 24, "装备维修器材入库情况统计表（中队）")
+            headers = [
+                '序号', '所属单位', '所属装备', '器材名称', '规格型号',
+                '器材编号', '数量', '计量单位', '单价（元）', '总价（元）',
+                '质量等级', '生产厂家', '计价方法', '品种标识码', '生产日期',
+                '存储寿命', '来源类别', '合同编号', '入库时间', '出库时间',
+                '出库去向', '出库人', '经办人', '备注'
+            ]
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=2, column=col, value=h)
+                cell.font = Font(name='宋体', size=10, bold=True)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[2].height = 20
+
+            for i, r in enumerate(records, start=3):
+                row_data = [
+                    i - 2,
+                    self.belong_unit,  # 所属单位
+                    r['belong_equipment'] or '',
+                    r['name'] or '',
+                    r['spec_model'] or '',
+                    r['serial_no'] or '',
+                    r['quantity'] or 0,
+                    r['unit'] or '',
+                    r['unit_price'] or 0,
+                    r['total_price'] or 0,
+                    r['quality_level'] or '',
+                    r['manufacturer'] or '',
+                    r['pricing_method'] or '',  # 来自 equipment 表
+                    r['category_code'] or '',
+                    r['production_date'] or '',
+                    r['storage_life'] or '',
+                    r['source'] or '',  # 来源
+                    r['contract_no'] or '',
+                    r['in_time'] or '',
+                    '',  # 出库时间（入库为空）
+                    '',  # 出库去向
+                    '',  # 出库人
+                    r['operator'] or '',
+                    r['remark'] or ''
+                ]
+                for col, val in enumerate(row_data, 1):
+                    ws.cell(row=i, column=col, value=val)
+            wb.save(file_path)
+            QMessageBox.information(self, "导出成功", f"已导出 {len(records)} 条中队入库记录")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+
+    def export_unit_out_excel(self):
+        """导出中队出库记录为中队统计表（24列）"""
+        records = self.db.get_unit_records(self.belong_unit, 'out')
+        if not records:
+            QMessageBox.information(self, "提示", "没有中队出库记录可导出")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出中队出库统计表", "",
+                                                   "Excel文件(*.xlsx)")
+        if not file_path:
+            return
+        try:
+            wb = Workbook()
+            ws = wb.active
+            self._write_stat_header(ws, 24, "装备维修器材出库情况统计表（中队）")
+            headers = [
+                '序号', '所属单位', '所属装备', '器材名称', '规格型号',
+                '器材编号', '数量', '计量单位', '单价（元）', '总价（元）',
+                '质量等级', '生产厂家', '计价方法', '品种标识码', '生产日期',
+                '存储寿命', '来源类别', '合同编号', '入库时间', '出库时间',
+                '出库去向', '出库人', '经办人', '备注'
+            ]
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=2, column=col, value=h)
+                cell.font = Font(name='宋体', size=10, bold=True)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[2].height = 20
+
+            for i, r in enumerate(records, start=3):
+                row_data = [
+                    i - 2,
+                    self.belong_unit,
+                    r['belong_equipment'] or '',
+                    r['name'] or '',
+                    r['spec_model'] or '',
+                    r['serial_no'] or '',
+                    r['quantity'] or 0,
+                    r['unit'] or '',
+                    r['unit_price'] or 0,
+                    r['total_price'] or 0,
+                    r['quality_level'] or '',
+                    r['manufacturer'] or '',
+                    r['pricing_method'] or '',
+                    r['category_code'] or '',
+                    r['production_date'] or '',
+                    r['storage_life'] or '',
+                    '',  # 来源类别（出库无）
+                    r['contract_no'] or '',
+                    '',  # 入库时间
+                    r['out_time'] or '',
+                    r['out_direction'] or '',
+                    r['stock_out_person'] or '',
+                    r['operator'] or '',
+                    r['remark'] or ''
+                ]
+                for col, val in enumerate(row_data, 1):
+                    ws.cell(row=i, column=col, value=val)
+            wb.save(file_path)
+            QMessageBox.information(self, "导出成功", f"已导出 {len(records)} 条中队出库记录")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+
+    def export_org_stock_excel(self):
+        """导出机关当前库存统计表（22列，仅正库存器材）"""
+        records = self.db.search_equipment()  # 获取所有器材
+        items = []
+        for r in records:
+            stock = self.db.get_org_current_stock(r['id'])
+            if stock > 0:
+                r_dict = dict(r)  # sqlite3.Row 转字典
+                r_dict['current_stock'] = stock
+                items.append(r_dict)
+        if not items:
+            QMessageBox.information(self, "提示", "当前没有库存器材可导出")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出机关库存统计表", "",
+                                                   "Excel文件(*.xlsx)")
+        if not file_path:
+            return
+        try:
+            wb = Workbook()
+            ws = wb.active
+            self._write_stat_header(ws, 22, "机关库存统计表")
+            headers = [
+                '序号', '所属单位', '所属装备', '器材名称', '规格型号',
+                '器材编号', '数量（库存）', '计量单位', '单价（元）', '总价（元）',
+                '质量等级', '生产厂家', '计价方法', '品种标识码', '生产日期',
+                '存储寿命', '来源类别', '合同编号', '', '', '', '备注'
+            ]
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=2, column=col, value=h)
+                cell.font = Font(name='宋体', size=10, bold=True)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[2].height = 20
+
+            for i, r in enumerate(items, start=3):
+                row_data = [
+                    i - 2,
+                    r['belong_unit'] or '',
+                    r['belong_equipment'] or '',
+                    r['name'] or '',
+                    r['spec_model'] or '',
+                    r['serial_no'] or '',
+                    r['current_stock'],  # 库存数量
+                    r['unit'] or '',
+                    r['unit_price'] or 0,
+                    r['unit_price'] * r['current_stock'] if r['unit_price'] else 0,  # 总价=单价×库存
+                    r['quality_level'] or '',
+                    r['manufacturer'] or '',
+                    r['pricing_method'] or '',
+                    r['category_code'] or '',
+                    r['production_date'] or '',
+                    r['storage_life'] or '',
+                    r['source_type'] or '',
+                    r['contract_no'] or '',
+                    '', '', '',  # 入库时间、入库人、经办人留空
+                    ''  # 备注
+                ]
+                for col, val in enumerate(row_data, 1):
+                    ws.cell(row=i, column=col, value=val)
+            wb.save(file_path)
+            QMessageBox.information(self, "导出成功", f"已导出 {len(items)} 条库存器材")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+
+    def export_unit_stock_excel(self):
+        """导出中队当前库存统计表（24列，仅正库存器材）"""
+        records = self.db.search_equipment()
+        items = []
+        for r in records:
+            stock = self.db.get_unit_current_stock(r['id'], self.belong_unit)
+            if stock > 0:
+                r_dict = dict(r)
+                r_dict['current_stock'] = stock
+                items.append(r_dict)
+        if not items:
+            QMessageBox.information(self, "提示", "当前没有库存器材可导出")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "导出中队库存统计表", "",
+                                                   "Excel文件(*.xlsx)")
+        if not file_path:
+            return
+        try:
+            wb = Workbook()
+            ws = wb.active
+            self._write_stat_header(ws, 24, f"{self.belong_unit} 库存统计表")
+            headers = [
+                '序号', '所属单位', '所属装备', '器材名称', '规格型号',
+                '器材编号', '数量（库存）', '计量单位', '单价（元）', '总价（元）',
+                '质量等级', '生产厂家', '计价方法', '品种标识码', '生产日期',
+                '存储寿命', '来源类别', '合同编号', '', '', '', '', '经办人', '备注'
+            ]
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=2, column=col, value=h)
+                cell.font = Font(name='宋体', size=10, bold=True)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[2].height = 20
+
+            for i, r in enumerate(items, start=3):
+                row_data = [
+                    i - 2,
+                    self.belong_unit,
+                    r['belong_equipment'] or '',
+                    r['name'] or '',
+                    r['spec_model'] or '',
+                    r['serial_no'] or '',
+                    r['current_stock'],
+                    r['unit'] or '',
+                    r['unit_price'] or 0,
+                    r['unit_price'] * r['current_stock'] if r['unit_price'] else 0,
+                    r['quality_level'] or '',
+                    r['manufacturer'] or '',
+                    r['pricing_method'] or '',
+                    r['category_code'] or '',
+                    r['production_date'] or '',
+                    r['storage_life'] or '',
+                    r['source_type'] or '',
+                    r['contract_no'] or '',
+                    '', '', '',  # 入库时间、出库时间、出库去向留空
+                    '',  # 经办人留空
+                    ''
+                ]
+                for col, val in enumerate(row_data, 1):
+                    ws.cell(row=i, column=col, value=val)
+            wb.save(file_path)
+            QMessageBox.information(self, "导出成功", f"已导出 {len(items)} 条库存器材")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+
     # ==================== 机关出库记录选项卡 ====================
     def create_org_out_tab(self):
-        """
-        创建机关出库记录选项卡
-        显示所有机关出库记录，支持新增出库、删除记录、重新生成本日出库单。
-        """
         w = QWidget()
         layout = QVBoxLayout(w)
 
@@ -2132,6 +2526,10 @@ class MainWindow(QMainWindow):
         btn_add = QPushButton("＋ 新增出库(发放中队)")
         btn_add.clicked.connect(self.add_org_out)
         bl.addWidget(btn_add)
+
+        btn_export = QPushButton("📤 导出Excel")  # 新增
+        btn_export.clicked.connect(self.export_org_out_excel)
+        bl.addWidget(btn_export)
 
         btn_delete = QPushButton("✕ 删除选中记录")
         btn_delete.clicked.connect(self.delete_org_out)
@@ -2153,7 +2551,7 @@ class MainWindow(QMainWindow):
             'ID', '器材编号', '器材名称', '规格型号', '发放中队', '出库数量', '总价',
             '出库时间', '出库去向', '出库人', '经办人', '合同编号', '备注'
         ])
-        self.org_out_table.setColumnHidden(0, True)  # 隐藏ID列
+        self.org_out_table.setColumnHidden(0, True)
         self.org_out_table.horizontalHeader().setStretchLastSection(True)
         self.org_out_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.org_out_table.setAlternatingRowColors(True)
@@ -2162,6 +2560,7 @@ class MainWindow(QMainWindow):
 
         self.refresh_org_out_table()
         return w
+
 
     def refresh_org_out_table(self):
         """刷新机关出库记录表格"""
@@ -2281,7 +2680,6 @@ class MainWindow(QMainWindow):
 
     # ==================== 中队入库记录选项卡 ====================
     def create_unit_in_tab(self):
-        """创建中队入库记录选项卡"""
         w = QWidget()
         layout = QVBoxLayout(w)
 
@@ -2293,6 +2691,10 @@ class MainWindow(QMainWindow):
         btn_import = QPushButton("📥 从Excel导入")
         btn_import.clicked.connect(lambda: self.import_unit_excel('in'))
         bl.addWidget(btn_import)
+
+        btn_export = QPushButton("📤 导出Excel")  # 新增
+        btn_export.clicked.connect(self.export_unit_in_excel)
+        bl.addWidget(btn_export)
 
         btn_delete = QPushButton("✕ 删除选中记录")
         btn_delete.clicked.connect(self.delete_unit_record)
@@ -2384,7 +2786,6 @@ class MainWindow(QMainWindow):
 
     # ==================== 中队出库记录选项卡 ====================
     def create_unit_out_tab(self):
-        """创建中队出库记录选项卡"""
         w = QWidget()
         layout = QVBoxLayout(w)
 
@@ -2396,6 +2797,10 @@ class MainWindow(QMainWindow):
         btn_import = QPushButton("📥 从Excel导入")
         btn_import.clicked.connect(lambda: self.import_unit_excel('out'))
         bl.addWidget(btn_import)
+
+        btn_export = QPushButton("📤 导出Excel")  # 新增
+        btn_export.clicked.connect(self.export_unit_out_excel)
+        bl.addWidget(btn_export)
 
         btn_delete = QPushButton("✕ 删除选中记录")
         btn_delete.clicked.connect(self.delete_unit_record)
@@ -2448,11 +2853,9 @@ class MainWindow(QMainWindow):
 
     # ==================== 机关库存看板 ====================
     def create_org_dashboard_tab(self):
-        """机关库存看板：统计卡片、按质量等级分布、低库存器材列表"""
         w = QWidget()
         layout = QVBoxLayout(w)
 
-        # 统计卡片容器
         sg = QGroupBox("机关总库库存总览")
         sl = QHBoxLayout(sg)
         self.org_c1 = self._card("器材种类", "0")
@@ -2465,7 +2868,6 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.org_c4)
         layout.addWidget(sg)
 
-        # 质量等级分布表格
         qg = QGroupBox("按质量等级")
         ql = QVBoxLayout(qg)
         self.org_qt = QTableWidget()
@@ -2476,7 +2878,6 @@ class MainWindow(QMainWindow):
         ql.addWidget(self.org_qt)
         layout.addWidget(qg)
 
-        # 低库存器材列表（≤5）
         lg = QGroupBox("低库存器材(≤5)")
         ll = QVBoxLayout(lg)
         self.org_lt = QTableWidget()
@@ -2487,9 +2888,16 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.org_lt)
         layout.addWidget(lg)
 
-        btn = QPushButton("↻ 刷新看板")
-        btn.clicked.connect(self.refresh_org_dash)
-        layout.addWidget(btn)
+        # 按钮行
+        bl = QHBoxLayout()
+        btn_refresh = QPushButton("↻ 刷新看板")
+        btn_refresh.clicked.connect(self.refresh_org_dash)
+        bl.addWidget(btn_refresh)
+        btn_export = QPushButton("📤 导出库存统计表")
+        btn_export.clicked.connect(self.export_org_stock_excel)
+        bl.addWidget(btn_export)
+        bl.addStretch()
+        layout.addLayout(bl)
 
         self.refresh_org_dash()
         return w
@@ -2526,7 +2934,6 @@ class MainWindow(QMainWindow):
 
     # ==================== 中队库存看板 ====================
     def create_unit_dashboard_tab(self):
-        """中队库存看板：与机关类似，统计本中队数据"""
         w = QWidget()
         layout = QVBoxLayout(w)
 
@@ -2562,9 +2969,15 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.unit_lt)
         layout.addWidget(lg)
 
-        btn = QPushButton("↻ 刷新看板")
-        btn.clicked.connect(self.refresh_unit_dash)
-        layout.addWidget(btn)
+        bl = QHBoxLayout()
+        btn_refresh = QPushButton("↻ 刷新看板")
+        btn_refresh.clicked.connect(self.refresh_unit_dash)
+        bl.addWidget(btn_refresh)
+        btn_export = QPushButton("📤 导出库存统计表")
+        btn_export.clicked.connect(self.export_unit_stock_excel)
+        bl.addWidget(btn_export)
+        bl.addStretch()
+        layout.addLayout(bl)
 
         self.refresh_unit_dash()
         return w
@@ -2599,18 +3012,17 @@ class MainWindow(QMainWindow):
 
     # ==================== 统计卡片辅助方法 ====================
     def _card(self, title, value):
-        """创建单个统计卡片"""
         f = QFrame()
         f.setStyleSheet("QFrame{background:#f5f5f5;border-radius:8px;padding:10px;margin:5px;}")
         l = QVBoxLayout(f)
         t = QLabel(title)
         t.setAlignment(Qt.AlignCenter)
-        t.setStyleSheet("font-size:11px;color:#666;")
+        t.setStyleSheet("font-size:14px;color:#666;")  # 从 11px 改为 14px
         l.addWidget(t)
         v = QLabel(value)
         v.setObjectName('v')
         v.setAlignment(Qt.AlignCenter)
-        v.setStyleSheet("font-size:22px;font-weight:bold;color:#2196F3;")
+        v.setStyleSheet("font-size:28px;font-weight:bold;color:#2196F3;")  # 从 22px 改为 28px
         l.addWidget(v)
         return f
 
@@ -2755,19 +3167,37 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "失败", str(e))
 
     def do_restore(self):
-        """恢复数据库（需谨慎）"""
-        if QMessageBox.warning(self, "警告", "恢复将覆盖当前所有数据！确定继续？",
-                               QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        """恢复数据库（需密码验证）"""
+        # 密码验证
+        password, ok = QInputDialog.getText(
+            self, "安全验证",
+            "请输入恢复操作密码：",
+            QLineEdit.Password, ""
+        )
+        if not ok or password != "danger":
+            if ok:
+                QMessageBox.critical(self, "密码错误", "恢复密码错误，操作已取消！")
             return
-        fp, _ = QFileDialog.getOpenFileName(self, "选择备份文件", "", "备份文件(*.bak *.db);;所有文件(*.*)")
+
+        # 二次确认
+        if QMessageBox.warning(self, "警告",
+                               "恢复将覆盖当前所有数据！确定继续？",
+                               QMessageBox.Yes | QMessageBox.No,
+                               QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        fp, _ = QFileDialog.getOpenFileName(self, "选择备份文件", "",
+                                             "备份文件(*.bak *.db);;所有文件(*.*)")
         if fp:
             try:
                 self.db.restore_database(fp)
                 self.db.add_log('恢复', '数据库', None, f'从{fp}恢复',
-                                operator=self.operator_name, role=self.role, belong_unit=self.belong_unit)
-                QMessageBox.information(self, "成功", "数据库已恢复，请重启程序。")
+                                operator=self.operator_name, role=self.role,
+                                belong_unit=self.belong_unit)
+                QMessageBox.information(self, "成功",
+                                        "数据库已恢复，请重启程序。")
             except Exception as e:
-                QMessageBox.critical(self, "失败", str(e))
+                QMessageBox.critical(self, "恢复失败", str(e))
 
     # ==================== 到期提醒 ====================
     def check_expiry(self):

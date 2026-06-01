@@ -209,7 +209,7 @@ class EquipmentSelectDialog(QDialog):
             self.table.setItem(i, 3, QTableWidgetItem(r['belong_unit'] or ''))
             self.table.setItem(i, 4, QTableWidgetItem(
                 f"¥{r['unit_price']:.2f}" if r['unit_price'] else ''))
-            self.table.setItem(i, 5, QTableWidgetItem(str(r['current_stock'] or 0)))
+            self.table.setItem(i, 5, QTableWidgetItem(str(int(r['current_stock']) or 0)))
 
     def select(self):
         row = self.table.currentRow()
@@ -539,9 +539,9 @@ class OrgStockInDialog(QDialog):
             self.table.setItem(row, 2, QTableWidgetItem(e['spec_model'] or ''))
 
             # 第4列：数量（数字输入框，嵌入表格）
-            qty_spin = QDoubleSpinBox()
-            qty_spin.setRange(0.01, 999999)     # 范围 0.01 ~ 999999
-            qty_spin.setDecimals(2)             # 保留两位小数
+            qty_spin = QSpinBox()
+            qty_spin.setRange(1, 999999)     # 范围 1 ~ 999999
+            #qty_spin.setDecimals(2)             # 保留两位小数
             qty_spin.setValue(1)                # 默认数量 1
             # 连接信号：数值变化时调用 calc_row 重新计算总价，lambda 捕获当前行号
             qty_spin.valueChanged.connect(lambda v, r=row: self.calc_row(r))
@@ -812,9 +812,9 @@ class OrgStockOutDialog(QDialog):
             self.table.setItem(row, 3, QTableWidgetItem(str(int(stock))))
 
             # 出库数量（数字输入框）
-            qty_spin = QDoubleSpinBox()
-            qty_spin.setRange(0.01, 999999)
-            qty_spin.setDecimals(2)
+            qty_spin = QSpinBox()
+            qty_spin.setRange(1, 999999)    #范围
+            #qty_spin.setDecimals(2)     #小数点
             qty_spin.setValue(1)
             qty_spin.valueChanged.connect(lambda v, r=row: self.calc_row(r))
             self.table.setCellWidget(row, 4, qty_spin)
@@ -1091,8 +1091,8 @@ class UnitStockInDialog(QDialog):
             self.table.setItem(row, 2, QTableWidgetItem(e['spec_model'] or ''))
 
             qty_spin = QDoubleSpinBox()
-            qty_spin.setRange(0.01, 999999)
-            qty_spin.setDecimals(2)
+            qty_spin.setRange(1, 999999)
+            #qty_spin.setDecimals(2)
             qty_spin.setValue(1)
             qty_spin.valueChanged.connect(lambda v, r=row: self.calc_row(r))
             self.table.setCellWidget(row, 3, qty_spin)
@@ -1324,8 +1324,8 @@ class UnitStockOutDialog(QDialog):
 
             # 出库数量（数字输入框）
             qty_spin = QDoubleSpinBox()
-            qty_spin.setRange(0.01, 999999)
-            qty_spin.setDecimals(2)
+            qty_spin.setRange(1, 999999)
+            #qty_spin.setDecimals(2)
             qty_spin.setValue(1)
             qty_spin.valueChanged.connect(lambda v, r=row: self.calc_row(r))
             self.table.setCellWidget(row, 4, qty_spin)
@@ -1715,33 +1715,54 @@ class MainWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout(w)
 
+        # ---------- 搜索筛选区域 ----------
+        sg = QGroupBox("搜索筛选")
+        sl = QHBoxLayout(sg)
+        sl.addWidget(QLabel("关键词:"))
+        self.org_in_search = QLineEdit()
+        self.org_in_search.setPlaceholderText("器材名称/规格型号/编号")
+        sl.addWidget(self.org_in_search)
+        sl.addWidget(QLabel("质量:"))
+        self.org_in_quality = QComboBox()
+        self.org_in_quality.addItems(['全部'] + QUALITY_LEVELS)
+        sl.addWidget(self.org_in_quality)
+        btn_search = QPushButton("搜索")
+        btn_search.clicked.connect(self.refresh_org_in_table)
+        sl.addWidget(btn_search)
+        btn_reset = QPushButton("重置")
+        btn_reset.clicked.connect(lambda: (
+            self.org_in_search.clear(),
+            self.org_in_quality.setCurrentIndex(0),
+            self.refresh_org_in_table()
+        ))
+        sl.addWidget(btn_reset)
+        sl.addStretch()
+        layout.addWidget(sg)
+
+        # ---------- 操作按钮行 ----------
         bl = QHBoxLayout()
         btn_add = QPushButton("＋ 新增入库")
         btn_add.clicked.connect(self.add_org_in)
         bl.addWidget(btn_add)
-
         btn_import = QPushButton("📥 从Excel导入")
         btn_import.clicked.connect(self.import_org_in_excel)
         bl.addWidget(btn_import)
-
-        btn_export = QPushButton("📤 导出Excel")  # 新增
+        btn_export = QPushButton("📤 导出Excel")
         btn_export.clicked.connect(self.export_org_in_excel)
         bl.addWidget(btn_export)
-
         btn_regen = QPushButton("📄 重新生成本日入库单")
         btn_regen.clicked.connect(self.regen_today_org_in)
         bl.addWidget(btn_regen)
-
         btn_delete = QPushButton("✕ 删除选中记录")
         btn_delete.clicked.connect(self.delete_org_in)
         bl.addWidget(btn_delete)
-
         bl.addStretch()
         btn_ref = QPushButton("↻ 刷新")
         btn_ref.clicked.connect(self.refresh_org_in_table)
         bl.addWidget(btn_ref)
         layout.addLayout(bl)
 
+        # ---------- 入库记录表格 ----------
         self.org_in_table = QTableWidget()
         self.org_in_table.setColumnCount(13)
         self.org_in_table.setHorizontalHeaderLabels([
@@ -1759,37 +1780,44 @@ class MainWindow(QMainWindow):
         return w
 
     def refresh_org_in_table(self):
-        """刷新机关入库记录表格"""
+        """刷新机关入库记录表格，支持搜索筛选"""
         records = self.db.get_all_org_stock_in()
+        # 获取筛选条件
+        keyword = self.org_in_search.text().strip()
+        q = self.org_in_quality.currentText()
+        if q == '全部':
+            q = ''
+        # 过滤
+        if keyword or q:
+            filtered = []
+            for r in records:
+                if keyword:
+                    kw = keyword.lower()
+                    match = (kw in (r['name'] or '').lower() or
+                             kw in (r['spec_model'] or '').lower() or
+                             kw in (r['serial_no'] or '').lower())
+                    if not match:
+                        continue
+                if q and (r['quality_level'] or '') != q:
+                    continue
+                filtered.append(r)
+            records = filtered
+
         self.org_in_table.setRowCount(len(records))
         for i, r in enumerate(records):
-            # 隐藏的ID列
-            id_item = QTableWidgetItem(str(r['id']))
-            self.org_in_table.setItem(i, 0, id_item)
-            # 器材编号
+            self.org_in_table.setItem(i, 0, QTableWidgetItem(str(r['id'])))
             self.org_in_table.setItem(i, 1, QTableWidgetItem(r['serial_no'] or ''))
-            # 器材名称
             self.org_in_table.setItem(i, 2, QTableWidgetItem(r['name'] or ''))
-            # 规格型号
             self.org_in_table.setItem(i, 3, QTableWidgetItem(r['spec_model'] or ''))
-            # 入库数量
-            self.org_in_table.setItem(i, 4, QTableWidgetItem(str(r['quantity'])))
-            # 计量单位
+            self.org_in_table.setItem(i, 4, QTableWidgetItem(str(int(r['quantity']))))
             self.org_in_table.setItem(i, 5, QTableWidgetItem(r['unit'] or ''))
-            # 总价
             self.org_in_table.setItem(i, 6, QTableWidgetItem(
                 f"¥{r['total_price']:.2f}" if r['total_price'] else ''))
-            # 入库时间
             self.org_in_table.setItem(i, 7, QTableWidgetItem(r['in_time'] or ''))
-            # 来源类别
             self.org_in_table.setItem(i, 8, QTableWidgetItem(r['source_type'] or ''))
-            # 入库人
             self.org_in_table.setItem(i, 9, QTableWidgetItem(r['stock_in_person'] or ''))
-            # 经办人
             self.org_in_table.setItem(i, 10, QTableWidgetItem(r['operator'] or ''))
-            # 合同编号
             self.org_in_table.setItem(i, 11, QTableWidgetItem(r['contract_no'] or ''))
-            # 备注
             self.org_in_table.setItem(i, 12, QTableWidgetItem(r['remark'] or ''))
 
     def add_org_in(self):
@@ -1849,7 +1877,7 @@ class MainWindow(QMainWindow):
                 'name': r['name'],
                 'spec_model': r['spec_model'],
                 'belong_equipment': equip['belong_equipment'] if equip else '',
-                'quantity': r['quantity'],
+                'quantity': int(r['quantity']),
                 'unit': r['unit'],
                 'unit_price': r['unit_price'],
                 'total_price': r['total_price'],
@@ -1943,7 +1971,7 @@ class MainWindow(QMainWindow):
                     continue
 
                 serial_no = safe_str(row[5])
-                qty = safe_float(row[6], 1.0)
+                qty = int(safe_float(row[6], 1.0))
                 unit = safe_str(row[7])
                 price = safe_float(row[8], 0.0)
                 quality = safe_str(row[10], '新品')
@@ -2056,7 +2084,7 @@ class MainWindow(QMainWindow):
                     continue
 
                 serial_no = safe_str(row[5])
-                qty = safe_float(row[6], 1.0)
+                qty = int(safe_float(row[6], 1.0))
                 unit = safe_str(row[7])
                 price = safe_float(row[8], 0.0)
                 quality = safe_str(row[10], '新品')
@@ -2185,7 +2213,7 @@ class MainWindow(QMainWindow):
                     r['name'] or '',  # 器材名称
                     r['spec_model'] or '',  # 规格型号
                     r['serial_no'] or '',  # 器材编号
-                    r['quantity'] or 0,  # 数量
+                    int(r['quantity']) or 0,  # 数量
                     r['unit'] or '',  # 计量单位
                     r['unit_price'] or 0,  # 单价
                     r['total_price'] or 0,  # 总价
@@ -2244,7 +2272,7 @@ class MainWindow(QMainWindow):
                     r['name'] or '',
                     r['spec_model'] or '',
                     r['serial_no'] or '',
-                    r['quantity'] or 0,
+                    int(r['quantity']) or 0,
                     r['unit'] or '',
                     r['unit_price'] or 0,
                     r['total_price'] or 0,
@@ -2303,7 +2331,7 @@ class MainWindow(QMainWindow):
                     r['name'] or '',
                     r['spec_model'] or '',
                     r['serial_no'] or '',
-                    r['quantity'] or 0,
+                    int(r['quantity']) or 0,
                     r['unit'] or '',
                     r['unit_price'] or 0,
                     r['total_price'] or 0,
@@ -2364,7 +2392,7 @@ class MainWindow(QMainWindow):
                     r['name'] or '',
                     r['spec_model'] or '',
                     r['serial_no'] or '',
-                    r['quantity'] or 0,
+                    int(r['quantity']) or 0,
                     r['unit'] or '',
                     r['unit_price'] or 0,
                     r['total_price'] or 0,
@@ -2572,7 +2600,7 @@ class MainWindow(QMainWindow):
             self.org_out_table.setItem(i, 2, QTableWidgetItem(r['name'] or ''))
             self.org_out_table.setItem(i, 3, QTableWidgetItem(r['spec_model'] or ''))
             self.org_out_table.setItem(i, 4, QTableWidgetItem(r['to_unit'] or ''))
-            self.org_out_table.setItem(i, 5, QTableWidgetItem(str(r['quantity'])))
+            self.org_out_table.setItem(i, 5, QTableWidgetItem(str(int(r['quantity']))))
             self.org_out_table.setItem(i, 6, QTableWidgetItem(f"¥{r['total_price']:.2f}" if r['total_price'] else ''))
             self.org_out_table.setItem(i, 7, QTableWidgetItem(r['out_time'] or ''))
             self.org_out_table.setItem(i, 8, QTableWidgetItem(r['out_direction'] or ''))
@@ -2634,7 +2662,7 @@ class MainWindow(QMainWindow):
                 'name': r['name'],
                 'spec_model': r['spec_model'],
                 'belong_equipment': equip['belong_equipment'] if equip else '',
-                'quantity': r['quantity'],
+                'quantity': int(r['quantity']),
                 'unit': r['unit'],
                 'unit_price': r['unit_price'],
                 'total_price': r['total_price'],
@@ -2683,23 +2711,44 @@ class MainWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout(w)
 
+        # ---------- 搜索筛选区域 ----------
+        sg = QGroupBox("搜索筛选")
+        sl = QHBoxLayout(sg)
+        sl.addWidget(QLabel("关键词:"))
+        self.unit_in_search = QLineEdit()
+        self.unit_in_search.setPlaceholderText("器材名称/规格型号/编号")
+        sl.addWidget(self.unit_in_search)
+        sl.addWidget(QLabel("质量:"))
+        self.unit_in_quality = QComboBox()
+        self.unit_in_quality.addItems(['全部'] + QUALITY_LEVELS)
+        sl.addWidget(self.unit_in_quality)
+        btn_search = QPushButton("搜索")
+        btn_search.clicked.connect(self.refresh_unit_in_table)
+        sl.addWidget(btn_search)
+        btn_reset = QPushButton("重置")
+        btn_reset.clicked.connect(lambda: (
+            self.unit_in_search.clear(),
+            self.unit_in_quality.setCurrentIndex(0),
+            self.refresh_unit_in_table()
+        ))
+        sl.addWidget(btn_reset)
+        sl.addStretch()
+        layout.addWidget(sg)
+
+        # ---------- 操作按钮行 ----------
         bl = QHBoxLayout()
         btn_add = QPushButton("＋ 新增中队入库")
         btn_add.clicked.connect(self.add_unit_in)
         bl.addWidget(btn_add)
-
         btn_import = QPushButton("📥 从Excel导入")
         btn_import.clicked.connect(lambda: self.import_unit_excel('in'))
         bl.addWidget(btn_import)
-
-        btn_export = QPushButton("📤 导出Excel")  # 新增
+        btn_export = QPushButton("📤 导出Excel")
         btn_export.clicked.connect(self.export_unit_in_excel)
         bl.addWidget(btn_export)
-
         btn_delete = QPushButton("✕ 删除选中记录")
         btn_delete.clicked.connect(self.delete_unit_record)
         bl.addWidget(btn_delete)
-
         bl.addStretch()
         btn_ref = QPushButton("↻ 刷新")
         btn_ref.clicked.connect(self.refresh_unit_in_table)
@@ -2723,14 +2772,34 @@ class MainWindow(QMainWindow):
         return w
 
     def refresh_unit_in_table(self):
+        """刷新中队入库记录表格，支持搜索筛选"""
         records = self.db.get_unit_records(self.belong_unit, 'in')
+        keyword = self.unit_in_search.text().strip()
+        q = self.unit_in_quality.currentText()
+        if q == '全部':
+            q = ''
+        if keyword or q:
+            filtered = []
+            for r in records:
+                if keyword:
+                    kw = keyword.lower()
+                    match = (kw in (r['name'] or '').lower() or
+                             kw in (r['spec_model'] or '').lower() or
+                             kw in (r['serial_no'] or '').lower())
+                    if not match:
+                        continue
+                if q and (r['quality_level'] or '') != q:
+                    continue
+                filtered.append(r)
+            records = filtered
+
         self.unit_in_table.setRowCount(len(records))
         for i, r in enumerate(records):
             self.unit_in_table.setItem(i, 0, QTableWidgetItem(str(r['id'])))
             self.unit_in_table.setItem(i, 1, QTableWidgetItem(r['serial_no'] or ''))
             self.unit_in_table.setItem(i, 2, QTableWidgetItem(r['name'] or ''))
             self.unit_in_table.setItem(i, 3, QTableWidgetItem(r['spec_model'] or ''))
-            self.unit_in_table.setItem(i, 4, QTableWidgetItem(str(r['quantity'])))
+            self.unit_in_table.setItem(i, 4, QTableWidgetItem(str(int(r['quantity']))))
             self.unit_in_table.setItem(i, 5, QTableWidgetItem(r['unit'] or ''))
             self.unit_in_table.setItem(i, 6, QTableWidgetItem(f"¥{r['total_price']:.2f}" if r['total_price'] else ''))
             self.unit_in_table.setItem(i, 7, QTableWidgetItem(r['in_time'] or ''))
@@ -2836,7 +2905,7 @@ class MainWindow(QMainWindow):
             self.unit_out_table.setItem(i, 1, QTableWidgetItem(r['serial_no'] or ''))
             self.unit_out_table.setItem(i, 2, QTableWidgetItem(r['name'] or ''))
             self.unit_out_table.setItem(i, 3, QTableWidgetItem(r['spec_model'] or ''))
-            self.unit_out_table.setItem(i, 4, QTableWidgetItem(str(r['quantity'])))
+            self.unit_out_table.setItem(i, 4, QTableWidgetItem(str(int(r['quantity']))))
             self.unit_out_table.setItem(i, 5, QTableWidgetItem(f"¥{r['total_price']:.2f}" if r['total_price'] else ''))
             self.unit_out_table.setItem(i, 6, QTableWidgetItem(r['out_time'] or ''))
             self.unit_out_table.setItem(i, 7, QTableWidgetItem(r['out_direction'] or ''))
@@ -2906,9 +2975,9 @@ class MainWindow(QMainWindow):
         """更新机关看板数据"""
         s = self.db.get_org_stock_summary()
         self._card_update(self.org_c1, str(s['total_types']))
-        self._card_update(self.org_c2, str(s['total_in']))
-        self._card_update(self.org_c3, str(s['total_out']))
-        self._card_update(self.org_c4, str(s['current_stock']))
+        self._card_update(self.org_c2, str(int(s['total_in'])))
+        self._card_update(self.org_c3, str(int(s['total_out'])))
+        self._card_update(self.org_c4, str(int(s['current_stock'])))
 
         # 质量等级统计
         qs = s['quality_stats']
@@ -2986,9 +3055,9 @@ class MainWindow(QMainWindow):
         """更新中队看板数据"""
         s = self.db.get_unit_stock_summary(self.belong_unit)
         self._card_update(self.unit_c1, str(s['total_types']))
-        self._card_update(self.unit_c2, str(s['total_in']))
-        self._card_update(self.unit_c3, str(s['total_out']))
-        self._card_update(self.unit_c4, str(s['current_stock']))
+        self._card_update(self.unit_c2, str(int(s['total_in'])))
+        self._card_update(self.unit_c3, str(int(s['total_out'])))
+        self._card_update(self.unit_c4, str(int(s['current_stock'])))
 
         qs = s['quality_stats']
         self.unit_qt.setRowCount(len(qs))
@@ -3006,7 +3075,7 @@ class MainWindow(QMainWindow):
         for i, r in enumerate(low):
             self.unit_lt.setItem(i, 0, QTableWidgetItem(r['name'] or ''))
             self.unit_lt.setItem(i, 1, QTableWidgetItem(r['spec_model'] or ''))
-            si = QTableWidgetItem(str(r['current_stock']))
+            si = QTableWidgetItem(str(int(r['current_stock'])))
             si.setForeground(Qt.red)
             self.unit_lt.setItem(i, 2, si)
 
